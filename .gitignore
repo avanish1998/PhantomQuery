@@ -1,3 +1,4 @@
 # Ignore IDE-related files
 .idea/
 .vscode/
+target/
