@@ -8,6 +8,7 @@ import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.List;
 
 @Service
 public class OpenAiService {
@@ -32,9 +33,12 @@ public class OpenAiService {
         requestBody.put("temperature", 0.7);
 
         HttpEntity<Map<String, Object>> request = new HttpEntity<>(requestBody, headers);
-        ResponseEntity<Map> response = restTemplate.postForEntity(apiUrl, request, Map.class);
+        @SuppressWarnings("unchecked")
+        ResponseEntity<Map<String, Object>> response = (ResponseEntity<Map<String, Object>>) (ResponseEntity<?>) restTemplate.postForEntity(apiUrl, request, Map.class);
         
         Map<String, Object> responseBody = response.getBody();
-        return ((Map)((java.util.List)responseBody.get("choices")).get(0)).get("text").toString();
+        @SuppressWarnings("unchecked")
+        List<Map<String, Object>> choices = (List<Map<String, Object>>) responseBody.get("choices");
+        return choices.get(0).get("text").toString();
     }
 } 

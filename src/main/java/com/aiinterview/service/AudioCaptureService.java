@@ -3,7 +3,6 @@ package com.aiinterview.service;
 import org.springframework.stereotype.Service;
 import javax.sound.sampled.*;
 import java.io.ByteArrayOutputStream;
-import java.io.IOException;
 
 @Service
 public class AudioCaptureService {
