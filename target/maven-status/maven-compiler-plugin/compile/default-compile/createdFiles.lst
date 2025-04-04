@@ -1,7 +1,0 @@
-com\aiinterview\service\AudioCaptureService.class
-com\aiinterview\service\OpenAiService.class
-com\aiinterview\AiInterviewAssistantApplication.class
-com\aiinterview\service\AIQueryProcessor.class
-com\aiinterview\service\SpeechToTextService.class
-com\aiinterview\controller\InterviewController.class
-com\aiinterview\config\WebSocketConfig.class
