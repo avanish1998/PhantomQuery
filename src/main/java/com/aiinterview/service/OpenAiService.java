@@ -5,40 +5,55 @@ import org.springframework.web.client.RestTemplate;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.MediaType;
-import org.springframework.http.ResponseEntity;
-import java.util.HashMap;
-import java.util.Map;
-import java.util.List;
+import java.util.*;
 
 @Service
 public class OpenAiService {
     private final String apiKey;
-    private final String apiUrl = "https://api.openai.com/v1/completions";
+    private final String apiUrl = "https://api.openai.com/v1/chat/completions";
     private final RestTemplate restTemplate;
+    private final String systemPrompt = "You are an AI Interview Assistant. Provide detailed, professional responses to interview questions. Focus on clarity and completeness in your answers.";
 
-    public OpenAiService(String apiKey) {
+    public OpenAiService() {
+        String apiKey = System.getenv("OPENAI_API_KEY");
+        if (apiKey == null || apiKey.trim().isEmpty()) {
+            throw new IllegalStateException("OPENAI_API_KEY environment variable is not set");
+        }
         this.apiKey = apiKey;
         this.restTemplate = new RestTemplate();
     }
 
-    public String createCompletion(String prompt) {
+    @SuppressWarnings("unchecked")
+    public String getCompletion(String prompt) {
+        List<Map<String, String>> messages = new ArrayList<>();
+        
+        // Add system message
+        Map<String, String> systemMessage = new HashMap<>();
+        systemMessage.put("role", "system");
+        systemMessage.put("content", systemPrompt);
+        messages.add(systemMessage);
+
+        // Add user message
+        Map<String, String> userMessage = new HashMap<>();
+        userMessage.put("role", "user");
+        userMessage.put("content", prompt);
+        messages.add(userMessage);
+
         HttpHeaders headers = new HttpHeaders();
         headers.setContentType(MediaType.APPLICATION_JSON);
         headers.setBearerAuth(apiKey);
 
         Map<String, Object> requestBody = new HashMap<>();
-        requestBody.put("model", "text-davinci-003");
-        requestBody.put("prompt", prompt);
-        requestBody.put("max_tokens", 200);
+        requestBody.put("model", "gpt-3.5-turbo");
+        requestBody.put("messages", messages);
         requestBody.put("temperature", 0.7);
 
         HttpEntity<Map<String, Object>> request = new HttpEntity<>(requestBody, headers);
-        @SuppressWarnings("unchecked")
-        ResponseEntity<Map<String, Object>> response = (ResponseEntity<Map<String, Object>>) (ResponseEntity<?>) restTemplate.postForEntity(apiUrl, request, Map.class);
+        Map<String, Object> response = restTemplate.postForObject(apiUrl, request, Map.class);
         
-        Map<String, Object> responseBody = response.getBody();
-        @SuppressWarnings("unchecked")
-        List<Map<String, Object>> choices = (List<Map<String, Object>>) responseBody.get("choices");
-        return choices.get(0).get("text").toString();
+        List<Map<String, Object>> choices = (List<Map<String, Object>>) response.get("choices");
+        Map<String, Object> choice = choices.get(0);
+        Map<String, Object> message = (Map<String, Object>) choice.get("message");
+        return (String) message.get("content");
     }
 } 
