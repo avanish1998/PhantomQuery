@@ -24,11 +24,15 @@ import com.fasterxml.jackson.databind.JsonNode;
 import java.util.Date;
 import javax.sound.sampled.AudioFormat;
 import java.util.UUID;
+import com.phantomquery.model.Conversation;
+import com.phantomquery.model.Message;
+import com.phantomquery.service.ConversationService;
 
 @Component
 public class SimpleWebSocketController extends TextWebSocketHandler {
     private static final Logger logger = LoggerFactory.getLogger(SimpleWebSocketController.class);
     private final Map<String, WebSocketSession> sessions = new ConcurrentHashMap<>();
+    private final Map<String, StringBuilder> audioBuffers = new ConcurrentHashMap<>();
     private final ObjectMapper objectMapper = new ObjectMapper();
     
     // For tracking speech segments
@@ -38,12 +42,14 @@ public class SimpleWebSocketController extends TextWebSocketHandler {
     private final SpeechToTextService speechToTextService;
     private final OpenAiService openAiService;
     
-    private final Map<String, List<byte[]>> audioBuffers = new ConcurrentHashMap<>();
     private final Map<String, Long> lastChunkTimestamps = new ConcurrentHashMap<>();
     private final Map<String, Boolean> isSpeaking = new ConcurrentHashMap<>();
     private final Map<String, Long> speechStartTimes = new ConcurrentHashMap<>();
     private static final long CHUNK_TIMEOUT_MS = 1000; // 1 second timeout for chunks
     private static final int MAX_MESSAGE_SIZE = 1024 * 1024; // 1MB max message size
+    
+    @Autowired
+    private ConversationService conversationService;
     
     @Autowired
     public SimpleWebSocketController(SpeechToTextService speechToTextService, OpenAiService openAiService) {
@@ -55,172 +61,205 @@ public class SimpleWebSocketController extends TextWebSocketHandler {
     public void afterConnectionEstablished(WebSocketSession session) {
         String sessionId = session.getId();
         sessions.put(sessionId, session);
-        speechSegmentCount.put(sessionId, 0);
-        logger.info("New client connected - ID: {}", sessionId);
+        audioBuffers.put(sessionId, new StringBuilder());
+        logger.info("Client connected: {}", sessionId);
+        
+        // Send the client ID to the client
+        try {
+            Map<String, Object> responseMap = new HashMap<>();
+            responseMap.put("type", "client_id");
+            responseMap.put("clientId", sessionId);
+            
+            String response = objectMapper.writeValueAsString(responseMap);
+            logger.info("Sending client ID to client {}: {}", sessionId, response);
+            
+            session.sendMessage(new TextMessage(response));
+        } catch (IOException e) {
+            logger.error("Error sending client ID to client {}: {}", sessionId, e.getMessage());
+        }
     }
 
     @Override
-    protected void handleTextMessage(WebSocketSession session, TextMessage message) throws Exception {
-        String payload = message.getPayload();
-        
-        // Check message size
-        if (payload.length() > MAX_MESSAGE_SIZE) {
-            logger.warn("Message too large ({} bytes), truncating", payload.length());
-            payload = payload.substring(0, MAX_MESSAGE_SIZE);
-        }
-        
-        logger.info("Received message from client {}: {} bytes", session.getId(), payload.length());
-        
-        // Store the message in session attributes for later use
-        session.getAttributes().put("lastMessage", payload);
+    protected void handleTextMessage(WebSocketSession session, TextMessage message) throws IOException {
+        String sessionId = session.getId();
+        JsonNode jsonNode = objectMapper.readTree(message.getPayload());
+        String type = jsonNode.get("type").asText();
 
-        try {
-            JsonNode jsonNode = objectMapper.readTree(payload);
-            String clientId = jsonNode.get("clientId").asText();
-            String type = jsonNode.get("type").asText();
-
-            switch (type) {
-                case "connection":
-                    logger.info("Connection message from client {}: {}", clientId, jsonNode.get("message").asText());
-                    break;
-                case "speech_start":
-                    handleSpeechStart(session, clientId, jsonNode);
-                    break;
-                case "speech_end":
-                    handleSpeechEnd(session, clientId, jsonNode);
-                    break;
-                case "speech":
-                    String audioData = jsonNode.get("audioData").asText();
-                    processSpeechSegment(session, clientId, audioData);
-                    break;
-                default:
-                    logger.warn("Unknown message type: {}", type);
-            }
-        } catch (Exception e) {
-            logger.error("Error processing message: {}", e.getMessage());
-            try {
-                session.sendMessage(new TextMessage("Error processing message: " + e.getMessage()));
-            } catch (IOException ex) {
-                logger.error("Error sending error message: {}", ex.getMessage());
-            }
-        }
-    }
-    
-    private void handleSpeechStart(WebSocketSession session, String clientId, JsonNode message) {
-        long timestamp = message.get("timestamp").asLong();
-        isSpeaking.put(clientId, true);
-        speechStartTimes.put(clientId, timestamp);
-        logger.info("Speech started for client {} at {}", clientId, new Date(timestamp));
-        
-        // Send acknowledgment
-        try {
-            Map<String, String> response = new HashMap<>();
-            response.put("type", "speech_start_ack");
-            session.sendMessage(new TextMessage(objectMapper.writeValueAsString(response)));
-        } catch (IOException e) {
-            logger.error("Error sending speech start acknowledgment: {}", e.getMessage());
+        switch (type) {
+            case "connection":
+                // Just acknowledge the connection
+                logger.info("Client {} connected: {}", sessionId, jsonNode.get("message").asText());
+                break;
+            case "speech_start":
+                handleSpeechStart(sessionId);
+                break;
+            case "speech_data":
+                handleSpeechData(sessionId, jsonNode);
+                break;
+            case "speech_end":
+                handleSpeechEnd(sessionId);
+                break;
+            case "speech":
+                // Handle direct speech data from Python client
+                String audioData = jsonNode.get("audioData").asText();
+                String clientId = jsonNode.has("clientId") ? jsonNode.get("clientId").asText() : sessionId;
+                logger.info("Received speech data from client: {}", clientId);
+                processSpeechSegment(session, clientId, audioData);
+                break;
+            case "send_message":
+                handleSendMessage(sessionId, jsonNode);
+                break;
+            case "clear_input":
+                handleClearInput(sessionId);
+                break;
+            default:
+                logger.warn("Unknown message type: {}", type);
         }
     }
 
-    private void handleSpeechEnd(WebSocketSession session, String clientId, JsonNode message) {
-        long timestamp = message.get("timestamp").asLong();
-        double duration = message.get("duration").asDouble();
-        isSpeaking.put(clientId, false);
-        logger.info("Speech ended for client {} at {} (duration: {:.2f}s)", 
-                   clientId, new Date(timestamp), duration);
-        
-        // Send acknowledgment
-        try {
-            Map<String, String> response = new HashMap<>();
-            response.put("type", "speech_end_ack");
-            response.put("duration", String.valueOf(duration));
-            session.sendMessage(new TextMessage(objectMapper.writeValueAsString(response)));
-        } catch (IOException e) {
-            logger.error("Error sending speech end acknowledgment: {}", e.getMessage());
-        }
-    }
-
-    /**
-     * Process a complete speech segment.
-     * This method converts the audio to text and optionally generates an AI response.
-     */
-    private void processSpeechSegment(WebSocketSession session, String clientId, String audioData) {
+    private void processSpeechSegment(WebSocketSession session, String sessionId, String audioData) {
         try {
             // Decode base64 audio data
             byte[] audioBytes = Base64.getDecoder().decode(audioData);
-            logger.info("Received audio data from client {}: {} bytes", clientId, audioBytes.length);
-            
-            // Get audio format information from the message
-            JsonNode formatNode = null;
-            try {
-                formatNode = objectMapper.readTree(session.getAttributes().get("lastMessage").toString()).get("format");
-            } catch (Exception e) {
-                logger.warn("Could not parse format information: {}", e.getMessage());
-            }
-            
-            AudioFormat audioFormat = null;
-            
-            if (formatNode != null) {
-                // Create audio format from the provided information
-                int sampleRate = formatNode.get("sampleRateHertz").asInt();
-                int channels = formatNode.get("audioChannelCount").asInt();
-                String encoding = formatNode.get("encoding").asText();
-                
-                // Determine sample size in bits based on encoding
-                int sampleSizeInBits = 16; // Default for LINEAR16
-                if ("LINEAR16".equals(encoding)) {
-                    sampleSizeInBits = 16;
-                } else if ("FLAC".equals(encoding)) {
-                    sampleSizeInBits = 16;
-                } else if ("MP3".equals(encoding)) {
-                    sampleSizeInBits = 16;
-                }
-                
-                // Create audio format
-                audioFormat = new AudioFormat(
-                    sampleRate,
-                    sampleSizeInBits,
-                    channels,
-                    true, // signed
-                    false // big endian
-                );
-                
-                logger.info("Using audio format from client: {}", audioFormat);
-            }
+            logger.info("Received audio data size: {} bytes", audioBytes.length);
             
             // Convert speech to text
             String transcription = speechToTextService.convertSpeechToText(audioBytes);
             
-            // Clean up the transcription
+            // Clean up the transcription (remove prefix if present)
             if (transcription != null && transcription.startsWith("Recognized text: ")) {
                 transcription = transcription.substring("Recognized text: ".length());
             }
             
             // Log the transcription
-            logger.info("Transcription from client {}: {}", clientId, transcription);
+            logger.info("Transcription for session {}: {}", sessionId, transcription);
             
-            // Send transcription back to client
-            Map<String, String> response = new HashMap<>();
-            response.put("type", "transcription");
-            response.put("text", transcription);
-            session.sendMessage(new TextMessage(objectMapper.writeValueAsString(response)));
+            // Create a simple, direct transcription message
+            Map<String, Object> responseMap = new HashMap<>();
+            responseMap.put("type", "transcription");
+            responseMap.put("text", transcription);
+            responseMap.put("append", false);
             
-            // Generate AI response if we have a valid transcription
-            if (transcription != null && !transcription.isEmpty()) {
-                String aiResponse = openAiService.getCompletion(transcription);
-                Map<String, String> aiResponseMessage = new HashMap<>();
-                aiResponseMessage.put("type", "ai_response");
-                aiResponseMessage.put("text", aiResponse);
-                session.sendMessage(new TextMessage(objectMapper.writeValueAsString(aiResponseMessage)));
+            // Convert to JSON
+            String response = objectMapper.writeValueAsString(responseMap);
+            logger.info("Broadcasting transcription to all clients: {}", response);
+            
+            // Broadcast to all connected clients
+            for (WebSocketSession clientSession : sessions.values()) {
+                try {
+                    clientSession.sendMessage(new TextMessage(response));
+                    logger.info("Sent transcription to client: {}", clientSession.getId());
+                } catch (IOException e) {
+                    logger.error("Error sending transcription to client {}: {}", clientSession.getId(), e.getMessage());
+                }
             }
+            
         } catch (Exception e) {
             logger.error("Error processing speech segment: {}", e.getMessage());
             try {
-                session.sendMessage(new TextMessage("Error processing speech: " + e.getMessage()));
+                String errorMessage = objectMapper.writeValueAsString(Map.of(
+                    "type", "error",
+                    "message", "Error processing speech: " + e.getMessage()
+                ));
+                session.sendMessage(new TextMessage(errorMessage));
             } catch (IOException ex) {
                 logger.error("Error sending error message: {}", ex.getMessage());
             }
         }
+    }
+
+    private void handleSpeechStart(String sessionId) {
+        audioBuffers.get(sessionId).setLength(0);
+        logger.info("Speech started for session: {}", sessionId);
+    }
+
+    private void handleSpeechData(String sessionId, JsonNode jsonNode) throws IOException {
+        String audioData = jsonNode.get("audio").asText();
+        audioBuffers.get(sessionId).append(audioData);
+        logger.info("Received audio data for session: {}", sessionId);
+        
+        // Process the audio data immediately
+        byte[] audioBytes = Base64.getDecoder().decode(audioData);
+        logger.info("Decoded audio data size: {} bytes", audioBytes.length);
+        
+        String transcription = speechToTextService.convertSpeechToText(audioBytes);
+        
+        // Clean up the transcription (remove prefix if present)
+        if (transcription != null && transcription.startsWith("Recognized text: ")) {
+            transcription = transcription.substring("Recognized text: ".length());
+        }
+        
+        // Log the transcription
+        logger.info("Transcription for session {}: {}", sessionId, transcription);
+        
+        // Send the transcription back to the client
+        WebSocketSession session = sessions.get(sessionId);
+        String response = objectMapper.writeValueAsString(Map.of(
+            "type", "transcription",
+            "text", transcription,
+            "append", false
+        ));
+        logger.info("Sending transcription response to client: {}", response);
+        session.sendMessage(new TextMessage(response));
+        
+        // No longer automatically generate AI response
+    }
+
+    private void handleSpeechEnd(String sessionId) throws IOException {
+        StringBuilder buffer = audioBuffers.get(sessionId);
+        if (buffer.length() > 0) {
+            String transcription = speechToTextService.convertSpeechToText(buffer.toString().getBytes());
+            WebSocketSession session = sessions.get(sessionId);
+            
+            // Get the current input value from the session attributes
+            String currentInput = (String) session.getAttributes().getOrDefault("currentInput", "");
+            boolean shouldAppend = !currentInput.isEmpty();
+            logger.info("Speech end - Current input: '{}', Should append: {}", currentInput, shouldAppend);
+            
+            // Store the new input value
+            session.getAttributes().put("currentInput", transcription);
+            
+            // Send the transcription back to the client
+            String response = objectMapper.writeValueAsString(Map.of(
+                "type", "transcription",
+                "text", transcription,
+                "append", shouldAppend
+            ));
+            logger.info("Sending final transcription response to client: {}", response);
+            session.sendMessage(new TextMessage(response));
+            
+            logger.info("Speech ended for session: {}", sessionId);
+            
+            // No longer automatically generate AI response
+        }
+    }
+
+    private void handleSendMessage(String sessionId, JsonNode jsonNode) throws IOException {
+        String content = jsonNode.get("content").asText();
+        String conversationId = jsonNode.get("conversationId").asText();
+        
+        // Add user message and get AI response
+        Message aiMessage = conversationService.addUserMessage(conversationId, content);
+        WebSocketSession session = sessions.get(sessionId);
+        
+        // Clear the input after sending
+        session.getAttributes().put("currentInput", "");
+        
+        // Send AI response back to client
+        session.sendMessage(new TextMessage(objectMapper.writeValueAsString(Map.of(
+            "type", "ai_response",
+            "content", aiMessage.getContent()
+        ))));
+        logger.info("AI response sent for session: {}", sessionId);
+    }
+
+    private void handleClearInput(String sessionId) throws IOException {
+        WebSocketSession session = sessions.get(sessionId);
+        session.getAttributes().put("currentInput", "");
+        session.sendMessage(new TextMessage(objectMapper.writeValueAsString(Map.of(
+            "type", "input_cleared"
+        ))));
+        logger.info("Input cleared for session: {}", sessionId);
     }
 
     @Override
@@ -232,7 +271,7 @@ public class SimpleWebSocketController extends TextWebSocketHandler {
     public void afterConnectionClosed(WebSocketSession session, CloseStatus status) {
         String sessionId = session.getId();
         sessions.remove(sessionId);
-        speechSegmentCount.remove(sessionId);
-        logger.info("Client disconnected - ID: {}", sessionId);
+        audioBuffers.remove(sessionId);
+        logger.info("Client disconnected: {}", sessionId);
     }
 } 

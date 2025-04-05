@@ -47,6 +47,13 @@ CONFIG_FILE = "device_config.txt"
 # Global variables
 device_id = None
 client_id = None
+ws = None
+is_connected = False
+reconnect_attempts = 0
+MAX_RECONNECT_ATTEMPTS = 5
+RECONNECT_DELAY = 5  # seconds
+last_reconnect_time = 0
+MIN_RECONNECT_INTERVAL = 10  # minimum seconds between reconnection attempts
 
 # Audio parameters
 CHUNK = 1024  # Reduced from 4096 to 1024 for smaller chunks
@@ -142,12 +149,26 @@ def on_error(ws, error):
 
 def on_close(ws, close_status_code, close_msg):
     """Handle WebSocket connection close."""
+    global is_connected, reconnect_attempts, last_reconnect_time
     logger.info(f"WebSocket connection closed - Status: {close_status_code}, Message: {close_msg}")
+    is_connected = False
+    
+    # Only attempt to reconnect if we haven't exceeded max attempts and enough time has passed
+    current_time = time.time()
+    if reconnect_attempts < MAX_RECONNECT_ATTEMPTS and (current_time - last_reconnect_time) > MIN_RECONNECT_INTERVAL:
+        logger.info(f"Attempting to reconnect in {RECONNECT_DELAY} seconds... (Attempt {reconnect_attempts + 1}/{MAX_RECONNECT_ATTEMPTS})")
+        time.sleep(RECONNECT_DELAY)
+        reconnect_websocket()
+    else:
+        logger.error("Maximum reconnection attempts reached or reconnecting too frequently. Please restart the application.")
 
 def on_open(ws):
     """Handle WebSocket connection open."""
-    global client_id
+    global client_id, is_connected, reconnect_attempts, last_reconnect_time
     logger.info("WebSocket connection established")
+    is_connected = True
+    reconnect_attempts = 0  # Reset reconnect attempts on successful connection
+    last_reconnect_time = time.time()  # Update last reconnect time
     
     # Generate client ID
     client_id = str(uuid.uuid4())
@@ -441,26 +462,25 @@ def audio_callback(in_data, frame_count, time_info, status):
     
     return (in_data, pyaudio.paContinue)
 
-def process_complete_speech(audio_buffer, speech_duration):
-    """Process a complete speech segment."""
+def process_complete_speech(audio_chunks):
+    """Process a complete speech segment and send it to the server."""
     try:
-        # Combine all audio chunks
-        complete_audio = b''.join(audio_buffer)
+        # Combine audio chunks
+        audio_data = b''.join(audio_chunks)
         
-        # Check if audio size exceeds maximum
-        if len(complete_audio) > MAX_SEGMENT_SIZE:
-            print(f"⚠️ Audio size ({len(complete_audio)} bytes) exceeds maximum ({MAX_SEGMENT_SIZE} bytes), truncating")
-            complete_audio = complete_audio[:MAX_SEGMENT_SIZE]
+        # Check if the audio size is within limits
+        if len(audio_data) > MAX_SEGMENT_SIZE:
+            print(f"⚠️ Audio too large ({len(audio_data)} bytes), truncating")
+            audio_data = audio_data[:MAX_SEGMENT_SIZE]
         
         # Convert to base64
-        audio_base64 = base64.b64encode(complete_audio).decode('utf-8')
+        audio_base64 = base64.b64encode(audio_data).decode('utf-8')
         
-        # Send audio data
+        # Send the audio data
         message = {
-            "clientId": client_id,
             "type": "speech",
             "audioData": audio_base64,
-            "duration": speech_duration,
+            "clientId": client_id,
             "format": {
                 "encoding": "LINEAR16",
                 "sampleRateHertz": RATE,
@@ -469,20 +489,79 @@ def process_complete_speech(audio_buffer, speech_duration):
             }
         }
         
-        if ws and ws.sock and ws.sock.connected:
+        # Check if WebSocket is still connected before sending
+        if ws and ws.sock and ws.sock.connected and is_connected:
             ws.send(json.dumps(message))
-            print(f"📤 Sent speech segment ({len(audio_buffer)} chunks, {len(complete_audio)} bytes)")
+            print(f"📤 Sent speech segment ({len(audio_chunks)} chunks, {len(audio_data)} bytes)")
         else:
             print("❌ WebSocket not connected, attempting to reconnect...")
-            connect_websocket()
+            # Attempt to reconnect
+            if reconnect_websocket():
+                # Retry sending the message after reconnection
+                time.sleep(2)  # Wait for reconnection
+                if ws and ws.sock and ws.sock.connected and is_connected:
+                    ws.send(json.dumps(message))
+                    print(f"📤 Sent speech segment after reconnection ({len(audio_chunks)} chunks, {len(audio_data)} bytes)")
+                else:
+                    print("❌ Failed to send speech segment after reconnection attempt")
+            else:
+                print("❌ Failed to reconnect, speech segment not sent")
+        
     except Exception as e:
-        print(f"❌ Error processing speech segment: {str(e)}")
-        if "connection was forcibly closed" in str(e):
-            print("🔄 Connection lost, attempting to reconnect...")
-            connect_websocket()
+        print(f"❌ Error processing speech: {str(e)}")
+        # Only attempt to reconnect if we haven't exceeded max attempts
+        if reconnect_attempts < MAX_RECONNECT_ATTEMPTS:
+            reconnect_websocket()
+
+def reconnect_websocket():
+    """Reconnect the WebSocket connection."""
+    global ws, reconnect_attempts, last_reconnect_time
+    
+    try:
+        # Check if we're already connected
+        if ws and ws.sock and ws.sock.connected and is_connected:
+            logger.info("WebSocket already connected, skipping reconnection")
+            return True
+            
+        reconnect_attempts += 1
+        last_reconnect_time = time.time()
+        
+        # Close existing connection if any
+        if ws and ws.sock:
+            ws.close()
+        
+        logger.info("Attempting to reconnect to WebSocket server...")
+        
+        # Create a new WebSocket connection
+        ws = websocket.WebSocketApp(
+            DEFAULT_WS_URL,
+            on_message=on_message,
+            on_error=on_error,
+            on_close=on_close,
+            on_open=on_open
+        )
+        
+        # Run WebSocket connection in a separate thread
+        ws_thread = threading.Thread(target=ws.run_forever)
+        ws_thread.daemon = True
+        ws_thread.start()
+        
+        # Wait for connection to establish
+        time.sleep(2)
+        
+        if ws and ws.sock and ws.sock.connected:
+            logger.info("WebSocket reconnection successful")
+            return True
+        else:
+            logger.error("WebSocket reconnection failed")
+            return False
+            
+    except Exception as e:
+        logger.error(f"Error during WebSocket reconnection: {str(e)}")
+        return False
 
 def main():
-    global device_id, client_id
+    global device_id, client_id, ws, is_connected, last_reconnect_time
     
     parser = argparse.ArgumentParser(description="Audio Capture for PhantomQuery")
     parser.add_argument("--device", type=int, help="Input device ID")
@@ -524,7 +603,13 @@ def main():
     
     try:
         while True:
-            time.sleep(1)
+            # Only check connection status if we're not already connected and enough time has passed
+            current_time = time.time()
+            if not is_connected and reconnect_attempts < MAX_RECONNECT_ATTEMPTS and (current_time - last_reconnect_time) > MIN_RECONNECT_INTERVAL:
+                logger.warning("WebSocket connection lost, attempting to reconnect...")
+                reconnect_websocket()
+            
+            time.sleep(5)  # Check connection status every 5 seconds
     except KeyboardInterrupt:
         logger.info("Stopping audio capture...")
         if client_id:
@@ -532,8 +617,10 @@ def main():
             stop_message = {
                 "clientId": client_id
             }
-            ws.send(json.dumps(stop_message))
-        ws.close()
+            if ws and ws.sock and ws.sock.connected and is_connected:
+                ws.send(json.dumps(stop_message))
+        if ws:
+            ws.close()
 
 if __name__ == "__main__":
     main() 

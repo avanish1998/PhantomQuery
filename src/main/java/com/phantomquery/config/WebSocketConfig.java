@@ -65,6 +65,7 @@ public class WebSocketConfig implements WebSocketMessageBrokerConfigurer, WebSoc
 
     @Override
     public void registerWebSocketHandlers(WebSocketHandlerRegistry registry) {
+        logger.info("Registering WebSocket handler for /simple-websocket");
         registry.addHandler(simpleWebSocketController, "/simple-websocket")
                 .setAllowedOrigins("*");
     }
