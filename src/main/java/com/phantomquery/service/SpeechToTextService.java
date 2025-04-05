@@ -35,112 +35,101 @@ public class SpeechToTextService {
         try {
             // Check for Google Cloud credentials
             String credentialsPath = System.getenv("GOOGLE_APPLICATION_CREDENTIALS");
-            LOGGER.info("GOOGLE_APPLICATION_CREDENTIALS environment variable: " + 
-                        (credentialsPath != null ? credentialsPath : "Not set"));
             
             // Initialize the Google Cloud Speech client
-            LOGGER.info("Attempting to create Google Cloud Speech client...");
             speechClient = SpeechClient.create();
             googleCloudAvailable = true;
-            LOGGER.info("Google Cloud Speech client initialized successfully");
+            LOGGER.info("Google Cloud Speech client initialized");
         } catch (IOException e) {
             LOGGER.log(Level.SEVERE, "Failed to initialize Google Cloud Speech client", e);
             googleCloudAvailable = false;
             LOGGER.warning("Falling back to simulated speech recognition");
         } catch (Exception e) {
-            LOGGER.log(Level.SEVERE, "Unexpected error initializing Google Cloud Speech client", e);
+            LOGGER.log(Level.SEVERE, "Unexpected error initializing SpeechToTextService", e);
             googleCloudAvailable = false;
-            LOGGER.warning("Falling back to simulated speech recognition");
-        }
-    }
-
-    public String convertSpeechToText(byte[] audioData) {
-        LOGGER.info("Converting speech to text, audio data size: " + audioData.length + " bytes");
-        try {
-            // Create a simple audio format for the raw audio data
-            // This is a fallback in case the audio data doesn't have proper headers
-            // Use 16kHz, 16-bit, mono as default (optimal for Google Cloud Speech-to-Text)
-            AudioFormat format = new AudioFormat(16000, 16, 1, true, false);
-            
-            // Create an audio input stream from the byte array
-            ByteArrayInputStream bais = new ByteArrayInputStream(audioData);
-            AudioInputStream ais;
-            
-            try {
-                // Try to get the audio format from the data
-                LOGGER.info("Attempting to get audio format from data...");
-                ais = AudioSystem.getAudioInputStream(bais);
-                format = ais.getFormat();
-                LOGGER.info("Processing audio with format: " + format);
-            } catch (UnsupportedAudioFileException e) {
-                // If the audio data doesn't have proper headers, create a raw audio stream
-                LOGGER.warning("Audio data doesn't have proper headers, using raw format: " + format);
-                ais = new AudioInputStream(bais, format, audioData.length / format.getFrameSize());
-            }
-            
-            // Check if the audio format is suitable for speech recognition
-            // More permissive format checking
-            boolean isSuitableFormat = format.getSampleRate() >= 8000 && 
-                                      format.getChannels() <= 2 && 
-                                      format.getSampleSizeInBits() >= 8;
-            
-            LOGGER.info("Audio format suitable for speech recognition: " + isSuitableFormat);
-            
-            if (isSuitableFormat) {
-                // Process the audio data for speech recognition
-                processAudioForRecognition(audioData, format);
-                
-                // Wait for recognition to complete (with timeout)
-                LOGGER.info("Waiting for recognition to complete (timeout: 10 seconds)...");
-                boolean completed = recognitionLatch.await(10, TimeUnit.SECONDS);
-                
-                if (completed) {
-                    String result = recognizedText.get();
-                    if (result != null && !result.isEmpty()) {
-                        LOGGER.info("Recognition completed successfully");
-                        return "Recognized text: " + result;
-                    } else {
-                        LOGGER.warning("No speech detected in the audio");
-                        return "No speech detected in the audio.";
-                    }
-                } else {
-                    LOGGER.warning("Speech recognition timed out");
-                    return "Speech recognition timed out. Please try again.";
-                }
-            } else {
-                LOGGER.warning("Audio format not suitable for speech recognition");
-                return "Audio received but may not be optimal for speech recognition. " +
-                       "For best results, use audio with: 8kHz+ sample rate, mono or stereo, 8+ bit depth.";
-            }
-        } catch (IOException | InterruptedException e) {
-            LOGGER.log(Level.SEVERE, "Error processing audio", e);
-            return "Error processing audio: " + e.getMessage();
         }
     }
     
-    private void processAudioForRecognition(byte[] audioData, AudioFormat format) {
-        LOGGER.info("Processing audio for recognition, format: " + format);
+    public String convertSpeechToText(byte[] audioData) {
+        LOGGER.info("Converting speech to text, audio data size: " + audioData.length + " bytes");
         
-        // Reset the recognition state
-        recognizedText.set("");
-        // Create a new CountDownLatch instead of trying to reset it
+        // Reset the recognition latch and text
         recognitionLatch = new CountDownLatch(1);
+        recognizedText.set("");
         
-        // Start a new thread for processing
+        // Default audio format (16kHz, 16-bit, mono)
+        AudioFormat defaultFormat = new AudioFormat(16000, 16, 1, true, false);
+        
+        try {
+            // Try to get the audio format from the data
+            LOGGER.info("Attempting to get audio format from data...");
+            AudioFormat format = defaultFormat;
+            
+            try {
+                ByteArrayInputStream bais = new ByteArrayInputStream(audioData);
+                AudioInputStream ais = AudioSystem.getAudioInputStream(bais);
+                format = ais.getFormat();
+                LOGGER.info("Audio format: " + format);
+            } catch (UnsupportedAudioFileException e) {
+                LOGGER.warning("Audio data doesn't have proper headers, using raw format: " + defaultFormat);
+                format = defaultFormat;
+            }
+            
+            // Check if the format is suitable for speech recognition
+            boolean formatSuitable = isFormatSuitable(format);
+            LOGGER.info("Audio format suitable for speech recognition: " + formatSuitable);
+            
+            if (!formatSuitable) {
+                LOGGER.warning("Audio format may not be optimal for recognition: " + format);
+            }
+            
+            // Process the audio for recognition
+            LOGGER.info("Processing audio for recognition, format: " + format);
+            processAudioForRecognition(audioData, format);
+            
+            // Wait for recognition to complete
+            LOGGER.info("Waiting for recognition to complete (timeout: 10 seconds)...");
+            boolean completed = recognitionLatch.await(10, TimeUnit.SECONDS);
+            
+            if (completed) {
+                LOGGER.info("Recognition completed successfully");
+                return "Recognized text: " + recognizedText.get();
+            } else {
+                LOGGER.warning("Recognition timed out");
+                return "Recognition timed out";
+            }
+        } catch (Exception e) {
+            LOGGER.log(Level.SEVERE, "Error converting speech to text", e);
+            return "Error: " + e.getMessage();
+        }
+    }
+    
+    private boolean isFormatSuitable(AudioFormat format) {
+        // Check if the format is suitable for speech recognition
+        // Most speech recognition systems work best with:
+        // - Sample rate >= 8000 Hz
+        // - Channels <= 2 (mono or stereo)
+        // - Bits per sample >= 8
+        return format.getSampleRate() >= 8000 && 
+               format.getChannels() <= 2 && 
+               format.getSampleSizeInBits() >= 8;
+    }
+    
+    private void processAudioForRecognition(byte[] audioData, AudioFormat format) {
+        // Start a thread for recognition to avoid blocking
         Thread recognitionThread = new Thread(() -> {
             try {
-                if (googleCloudAvailable && speechClient != null) {
+                if (googleCloudAvailable) {
                     LOGGER.info("Using Google Cloud Speech-to-Text for recognition");
-                    // Use Google Cloud Speech-to-Text for real speech recognition
                     recognizeSpeechWithGoogleCloud(audioData, format);
                 } else {
-                    LOGGER.warning("Google Cloud Speech-to-Text not available, using simulated recognition");
-                    // Fallback to simulated recognition if Google Cloud client is not available
+                    LOGGER.info("Using simulated speech recognition");
                     simulateSpeechRecognition();
                 }
             } catch (Exception e) {
-                LOGGER.log(Level.SEVERE, "Error in speech recognition", e);
-                recognizedText.set("Error in speech recognition: " + e.getMessage());
+                LOGGER.log(Level.SEVERE, "Error in recognition thread", e);
+                recognizedText.set("Error during recognition: " + e.getMessage());
+            } finally {
                 recognitionLatch.countDown();
             }
         });
@@ -151,73 +140,51 @@ public class SpeechToTextService {
     private void recognizeSpeechWithGoogleCloud(byte[] audioData, AudioFormat format) throws IOException {
         LOGGER.info("Recognizing speech with Google Cloud, audio size: " + audioData.length + " bytes");
         
-        try {
-            // Configure the recognition
-            LOGGER.info("Configuring recognition with sample rate: " + format.getSampleRate() + 
-                        ", channels: " + format.getChannels());
-            
-            RecognitionConfig config = RecognitionConfig.newBuilder()
+        // Configure the recognition
+        LOGGER.info("Configuring recognition with sample rate: " + format.getSampleRate() + 
+                   ", channels: " + format.getChannels());
+        
+        RecognitionConfig config = RecognitionConfig.newBuilder()
                 .setEncoding(RecognitionConfig.AudioEncoding.LINEAR16)
                 .setLanguageCode("en-US")
                 .setSampleRateHertz((int) format.getSampleRate())
                 .setAudioChannelCount(format.getChannels())
                 .setEnableAutomaticPunctuation(true)
-                .setModel("video")  // Use the video model which is better for longer audio
+                .setModel("video")
                 .build();
-            
-            // Create the audio content
-            ByteString audioBytes = ByteString.copyFrom(audioData);
-            RecognitionAudio audio = RecognitionAudio.newBuilder()
+        
+        // Create the audio content
+        ByteString audioBytes = ByteString.copyFrom(audioData);
+        RecognitionAudio audio = RecognitionAudio.newBuilder()
                 .setContent(audioBytes)
                 .build();
-            
-            LOGGER.info("Sending request to Google Cloud Speech-to-Text API...");
-            
-            // Perform the transcription
-            RecognizeResponse response = speechClient.recognize(config, audio);
-            List<SpeechRecognitionResult> results = response.getResultsList();
-            
-            LOGGER.info("Received response from Google Cloud Speech-to-Text API with " + 
-                        results.size() + " results");
-            
-            StringBuilder transcription = new StringBuilder();
-            for (SpeechRecognitionResult result : results) {
-                SpeechRecognitionAlternative alternative = result.getAlternativesList().get(0);
-                transcription.append(alternative.getTranscript()).append(" ");
+        
+        // Perform the transcription
+        LOGGER.info("Sending request to Google Cloud Speech-to-Text API...");
+        RecognizeResponse response = speechClient.recognize(config, audio);
+        List<SpeechRecognitionResult> results = response.getResultsList();
+        
+        LOGGER.info("Received response from Google Cloud Speech-to-Text API with " + 
+                   results.size() + " results");
+        
+        // Process the results
+        StringBuilder transcription = new StringBuilder();
+        for (SpeechRecognitionResult result : results) {
+            List<SpeechRecognitionAlternative> alternatives = result.getAlternativesList();
+            for (SpeechRecognitionAlternative alternative : alternatives) {
+                String text = alternative.getTranscript();
+                LOGGER.info("Google Cloud Speech recognition result: " + text);
+                transcription.append(text).append(" ");
             }
-            
-            String finalTranscription = transcription.toString().trim();
-            LOGGER.info("Google Cloud Speech recognition result: " + finalTranscription);
-            
-            if (!finalTranscription.isEmpty()) {
-                recognizedText.set(finalTranscription);
-            } else {
-                LOGGER.warning("No speech detected in the audio (Google Cloud)");
-                recognizedText.set("No speech detected in the audio.");
-            }
-        } catch (Exception e) {
-            LOGGER.log(Level.SEVERE, "Error in Google Cloud Speech recognition", e);
-            throw new IOException("Google Cloud Speech recognition error: " + e.getMessage(), e);
-        } finally {
-            recognitionLatch.countDown();
         }
+        
+        recognizedText.set(transcription.toString().trim());
     }
     
     private void simulateSpeechRecognition() throws InterruptedException {
-        LOGGER.info("Simulating speech recognition");
-        
-        // Simulate speech recognition processing
+        // Simulate a delay for testing purposes
         Thread.sleep(1000);
-        
-        // Simulate recognizing some text
-        String simulatedText = "This is a simulated speech recognition result. " +
-                          "In a real implementation, this would be the actual recognized text.";
-        LOGGER.info("Simulated recognition result: " + simulatedText);
-        
-        recognizedText.set(simulatedText);
-        
-        // Signal that recognition is complete
-        recognitionLatch.countDown();
+        recognizedText.set("This is a simulated speech recognition result for testing purposes.");
     }
     
     public boolean isSendToOpenAI() {
@@ -226,7 +193,6 @@ public class SpeechToTextService {
     
     public void setSendToOpenAI(boolean send) {
         sendToOpenAI.set(send);
-        LOGGER.info("Send to OpenAI set to: " + send);
     }
     
     public boolean isGoogleCloudAvailable() {
