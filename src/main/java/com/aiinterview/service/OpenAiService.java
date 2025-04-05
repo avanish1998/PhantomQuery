@@ -12,7 +12,7 @@ public class OpenAiService {
     private final String apiKey;
     private final String apiUrl = "https://api.openai.com/v1/chat/completions";
     private final RestTemplate restTemplate;
-    private final String systemPrompt = "You are an AI Interview Assistant. Provide detailed, professional responses to interview questions. Focus on clarity and completeness in your answers.";
+    private final String systemPrompt = "You are PhantomQuery, an advanced AI system. Provide detailed, professional responses to queries. Focus on clarity and completeness in your answers.";
 
     public OpenAiService() {
         String apiKey = System.getenv("OPENAI_API_KEY");

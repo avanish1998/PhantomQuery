@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-Audio Capture Script for AI Interview Assistant
+Audio Capture Script for PhantomQuery
 
-This script captures audio from a virtual audio device and sends it to the Java backend
-via WebSocket for real-time speech-to-text processing.
+This script captures audio from a specified input device and streams it to the PhantomQuery
+backend server via WebSocket connection. It handles real-time audio capture, speech detection,
+and streaming of audio data.
 
 Requirements:
 - Python 3.6+
@@ -12,218 +13,527 @@ Requirements:
 - numpy
 
 Usage:
-    python audio_capture.py [--device DEVICE_ID] [--sample-rate SAMPLE_RATE] [--chunk-size CHUNK_SIZE]
-
-Example:
-    python audio_capture.py --device 1 --sample-rate 16000 --chunk-size 1024
+    python audio_capture.py [--device DEVICE_ID] [--sample-rate SAMPLE_RATE] [--chunk-size CHUNK_SIZE] [--ws-url WS_URL]
 """
 
-import argparse
-import base64
-import json
+import os
 import sys
+import json
 import time
-import uuid
 import wave
-from threading import Thread
-
-import numpy as np
 import pyaudio
+import numpy as np
 import websocket
-from websocket import WebSocketApp
+import threading
+import argparse
+import logging
+from datetime import datetime
+import uuid
+import base64
 
-# Default configuration
+# Configure logging
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
+
+# Constants
 DEFAULT_SAMPLE_RATE = 16000
-DEFAULT_CHUNK_SIZE = 1024
-DEFAULT_CHANNELS = 1
-DEFAULT_FORMAT = pyaudio.paInt16
-DEFAULT_WEBSOCKET_URL = "ws://localhost:8080/audio-stream/websocket"
+DEFAULT_CHUNK_SIZE = 2048
+DEFAULT_WS_URL = "ws://localhost:8080/simple-websocket"
+CONFIG_FILE = "device_config.txt"
 
-class AudioCapture:
-    def __init__(self, device_id=None, sample_rate=DEFAULT_SAMPLE_RATE, 
-                 chunk_size=DEFAULT_CHUNK_SIZE, channels=DEFAULT_CHANNELS, 
-                 format=DEFAULT_FORMAT, websocket_url=DEFAULT_WEBSOCKET_URL):
-        self.device_id = device_id
-        self.sample_rate = sample_rate
-        self.chunk_size = chunk_size
-        self.channels = channels
-        self.format = format
-        self.websocket_url = websocket_url
-        self.client_id = str(uuid.uuid4())
-        self.session_id = None
-        self.is_running = False
-        self.audio = pyaudio.PyAudio()
-        self.ws = None
-        
-        # Print available audio devices
-        self._print_audio_devices()
-    
-    def _print_audio_devices(self):
-        """Print all available audio devices."""
-        print("\nAvailable Audio Devices:")
-        print("------------------------")
-        for i in range(self.audio.get_device_count()):
-            device_info = self.audio.get_device_info_by_index(i)
-            device_name = device_info.get('name', 'Unknown')
-            max_input_channels = device_info.get('maxInputChannels', 0)
-            max_output_channels = device_info.get('maxOutputChannels', 0)
+# Global variables
+device_id = None
+client_id = None
+
+# Audio parameters
+CHUNK = 1024  # Reduced from 4096 to 1024 for smaller chunks
+FORMAT = pyaudio.paInt16
+CHANNELS = 1
+RATE = 16000  # 16kHz is optimal for Google Cloud Speech-to-Text
+SILENCE_THRESHOLD = 100
+SILENCE_DURATION = 1.0  # seconds of silence to consider speech ended
+MAX_SEGMENT_SIZE = 8192  # Maximum size of audio segment to send (8KB)
+MAX_SPEECH_DURATION = 5.0  # Maximum duration of speech to process (seconds)
+
+def load_device_config():
+    """Load device configuration from file."""
+    try:
+        config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), CONFIG_FILE)
+        if not os.path.exists(config_path):
+            logger.error(f"Configuration file not found: {config_path}")
+            return None
             
-            device_type = "Input" if max_input_channels > 0 else "Output"
-            if max_input_channels > 0 and max_output_channels > 0:
-                device_type = "Input/Output"
-            
-            print(f"Device {i}: {device_name} ({device_type})")
-        
-        print("------------------------\n")
-    
-    def _on_message(self, ws, message):
-        """Handle incoming WebSocket messages."""
-        try:
-            data = json.loads(message)
-            message_type = data.get('type')
-            
-            if message_type == 'started':
-                self.session_id = data.get('sessionId')
-                print(f"Stream started with session ID: {self.session_id}")
-            elif message_type == 'transcription':
-                text = data.get('text', '')
-                print(f"Transcription: {text}")
-            elif message_type == 'error':
-                error = data.get('message', 'Unknown error')
-                print(f"Error: {error}")
-            elif message_type == 'stopped':
-                print("Stream stopped")
-                self.is_running = False
-        except Exception as e:
-            print(f"Error processing message: {e}")
-    
-    def _on_error(self, ws, error):
-        """Handle WebSocket errors."""
-        print(f"WebSocket error: {error}")
-    
-    def _on_close(self, ws, close_status_code, close_msg):
-        """Handle WebSocket connection close."""
-        print("WebSocket connection closed")
-        self.is_running = False
-    
-    def _on_open(self, ws):
-        """Handle WebSocket connection open."""
-        print("WebSocket connection established")
-        
-        # Start the stream
-        start_message = {
-            'clientId': self.client_id
-        }
-        ws.send(json.dumps(start_message))
-    
-    def _audio_callback(self, in_data, frame_count, time_info, status):
-        """Process audio data and send it to the WebSocket."""
-        if self.is_running and self.ws and self.ws.sock and self.ws.sock.connected:
-            try:
-                # Convert audio data to base64
-                audio_data = base64.b64encode(in_data).decode('utf-8')
+        with open(config_path, "r") as f:
+            config = {}
+            for line in f:
+                if "=" in line:
+                    key, value = line.strip().split("=", 1)
+                    config[key] = value
+                    
+            if "device_id" not in config or "device_type" not in config:
+                logger.error("Invalid configuration file format")
+                return None
                 
-                # Create message
-                message = {
-                    'clientId': self.client_id,
-                    'audioData': audio_data
-                }
+            if config["device_type"] != "input":
+                logger.error("Configuration is not for an input device")
+                return None
                 
-                # Send audio data
-                self.ws.send(json.dumps(message))
-            except Exception as e:
-                print(f"Error sending audio data: {e}")
-        
-        return (in_data, pyaudio.paContinue)
+            return config["device_id"]
+    except Exception as e:
+        logger.error(f"Error loading configuration: {str(e)}")
+        return None
+
+def list_audio_devices():
+    """List all available audio devices."""
+    p = pyaudio.PyAudio()
+    info = p.get_host_api_info_by_index(0)
+    numdevices = info.get('deviceCount')
     
-    def start(self):
-        """Start capturing audio and sending it to the WebSocket."""
-        if self.is_running:
-            print("Audio capture is already running")
-            return
+    print("\nAvailable Audio Devices:")
+    print("------------------------")
+    
+    input_devices = []
+    output_devices = []
+    
+    for i in range(0, numdevices):
+        device_info = p.get_device_info_by_host_api_device_index(0, i)
+        name = device_info.get('name')
+        max_input_channels = device_info.get('maxInputChannels')
+        max_output_channels = device_info.get('maxOutputChannels')
         
-        # Connect to WebSocket
-        websocket.enableTrace(True)
-        self.ws = WebSocketApp(
-            self.websocket_url,
-            on_message=self._on_message,
-            on_error=self._on_error,
-            on_close=self._on_close,
-            on_open=self._on_open
-        )
+        if max_input_channels > 0:
+            input_devices.append((i, name))
+            print(f"Device {i}: {name} (Input)")
         
-        # Start WebSocket connection in a separate thread
-        ws_thread = Thread(target=self.ws.run_forever)
-        ws_thread.daemon = True
-        ws_thread.start()
+        if max_output_channels > 0:
+            output_devices.append((i, name))
+            print(f"Device {i}: {name} (Output)")
+    
+    p.terminate()
+    return input_devices, output_devices
+
+def on_message(ws, message):
+    """Handle incoming WebSocket messages."""
+    try:
+        data = json.loads(message)
+        message_type = data.get("type")
         
-        # Wait for WebSocket connection to be established
-        time.sleep(1)
-        
-        # Open audio stream
-        stream = self.audio.open(
-            format=self.format,
-            channels=self.channels,
-            rate=self.sample_rate,
+        if message_type == "transcription":
+            text = data.get("text", "")
+            print(f"\nTranscription: {text}")
+        elif message_type == "error":
+            error = data.get("message", "Unknown error")
+            logger.error(f"Server error: {error}")
+        elif message_type == "started":
+            session_id = data.get("sessionId")
+            logger.info(f"Stream started with session ID: {session_id}")
+        elif message_type == "stopped":
+            session_id = data.get("sessionId")
+            logger.info(f"Stream stopped for session ID: {session_id}")
+    except Exception as e:
+        logger.error(f"Error processing message: {str(e)}")
+
+def on_error(ws, error):
+    """Handle WebSocket errors."""
+    logger.error(f"WebSocket error: {str(error)}")
+
+def on_close(ws, close_status_code, close_msg):
+    """Handle WebSocket connection close."""
+    logger.info(f"WebSocket connection closed - Status: {close_status_code}, Message: {close_msg}")
+
+def on_open(ws):
+    """Handle WebSocket connection open."""
+    global client_id
+    logger.info("WebSocket connection established")
+    
+    # Generate client ID
+    client_id = str(uuid.uuid4())
+    
+    # Send a connection message
+    connection_message = {
+        "clientId": client_id,
+        "type": "connection",
+        "message": "Python audio capture connected"
+    }
+    ws.send(json.dumps(connection_message))
+    print("📤 Connected to WebSocket server")
+    
+    # Start audio capture in a separate thread
+    threading.Thread(target=capture_audio, args=(ws, client_id)).start()
+
+def capture_audio(ws, client_id):
+    """Capture audio from the specified device and send it through WebSocket."""
+    try:
+        p = pyaudio.PyAudio()
+        stream = p.open(
+            format=pyaudio.paInt16,
+            channels=1,
+            rate=DEFAULT_SAMPLE_RATE,
             input=True,
-            input_device_index=self.device_id,
-            frames_per_buffer=self.chunk_size,
-            stream_callback=self._audio_callback
+            input_device_index=int(device_id),
+            frames_per_buffer=DEFAULT_CHUNK_SIZE
         )
         
-        # Start the stream
-        stream.start_stream()
-        self.is_running = True
+        logger.info(f"Started capturing audio from device {device_id}")
+        print("🎤 Audio capture started - Waiting for speech...")
         
-        print(f"Audio capture started (Device ID: {self.device_id}, Sample Rate: {self.sample_rate}, Chunk Size: {self.chunk_size})")
-        print("Press Ctrl+C to stop")
+        # For speech detection
+        SILENCE_THRESHOLD = 100  # Adjust based on your environment
+        SILENCE_DURATION = 1.0  # Seconds of silence to consider speech ended
+        MIN_SPEECH_DURATION = 0.5  # Minimum duration to consider as speech
         
-        try:
-            while self.is_running:
-                time.sleep(0.1)
-        except KeyboardInterrupt:
-            print("\nStopping audio capture...")
-            self.stop()
+        # Speech detection variables
+        is_speaking = False
+        speech_start_time = 0
+        silence_start_time = 0
+        audio_buffer = []
+        last_print_time = time.time()
+        
+        while True:
+            try:
+                # Read audio data
+                data = stream.read(DEFAULT_CHUNK_SIZE, exception_on_overflow=False)
+                audio_data = np.frombuffer(data, dtype=np.int16)
+                
+                # Calculate audio level
+                audio_level = np.abs(audio_data).mean()
+                
+                # Print audio level every 5 seconds
+                if time.time() - last_print_time >= 5.0:
+                    print(f"🎤 Audio Level: {audio_level:.2f}")
+                    last_print_time = time.time()
+                
+                # Speech detection logic
+                current_time = time.time()
+                
+                if audio_level > SILENCE_THRESHOLD:
+                    # Speech detected
+                    if not is_speaking:
+                        # Start of speech
+                        is_speaking = True
+                        speech_start_time = current_time
+                        audio_buffer = [data]  # Start new buffer
+                        print("🗣️ Speech detected")
+                    else:
+                        # Continuing speech
+                        audio_buffer.append(data)
+                    
+                    # Reset silence timer
+                    silence_start_time = 0
+                else:
+                    # Silence detected
+                    if is_speaking:
+                        if silence_start_time == 0:
+                            # Start of silence
+                            silence_start_time = current_time
+                        
+                        # Check if silence has lasted long enough to consider speech ended
+                        if current_time - silence_start_time >= SILENCE_DURATION:
+                            # End of speech
+                            speech_duration = current_time - speech_start_time
+                            
+                            if speech_duration >= MIN_SPEECH_DURATION:
+                                # Process complete speech segment
+                                print(f"✅ Speech ended (duration: {speech_duration:.2f}s)")
+                                
+                                # Combine all audio chunks
+                                complete_audio = b''.join(audio_buffer)
+                                
+                                # Convert to base64
+                                audio_base64 = base64.b64encode(complete_audio).decode('utf-8')
+                                
+                                # Create message with complete speech segment
+                                message = {
+                                    "clientId": client_id,
+                                    "type": "speech",
+                                    "audioData": audio_base64,
+                                    "duration": speech_duration
+                                }
+                                
+                                # Send the message
+                                ws.send(json.dumps(message))
+                                print(f"📤 Sent speech segment ({len(audio_buffer)} chunks, {len(complete_audio)} bytes)")
+                            else:
+                                print(f"❌ Speech too short ({speech_duration:.2f}s), ignoring")
+                            
+                            # Reset for next speech segment
+                            is_speaking = False
+                            audio_buffer = []
+            
+            except Exception as e:
+                logger.error(f"Error capturing audio: {str(e)}")
+                break
+                
+    except Exception as e:
+        logger.error(f"Error setting up audio capture: {str(e)}")
+    finally:
+        if 'stream' in locals():
+            stream.stop_stream()
+            stream.close()
+        if 'p' in locals():
+            p.terminate()
+        logger.info("Audio capture stopped")
+
+def process_audio_chunk(audio_data):
+    """Process a single chunk of audio data."""
+    try:
+        # Convert to base64
+        audio_base64 = base64.b64encode(audio_data).decode('utf-8')
+        
+        # Create message
+        message = {
+            "clientId": client_id,
+            "type": "speech",
+            "audioData": audio_base64,
+            "timestamp": int(time.time() * 1000)
+        }
+        
+        # Send message
+        if ws and ws.sock and ws.sock.connected:
+            ws.send(json.dumps(message))
+            print("📤 Sent audio chunk")
+        else:
+            print("❌ WebSocket not connected, attempting to reconnect...")
+            connect_websocket()
+            
+    except Exception as e:
+        print(f"❌ Error processing audio chunk: {str(e)}")
+        if "connection was forcibly closed" in str(e):
+            print("🔄 Connection lost, attempting to reconnect...")
+            connect_websocket()
+
+def connect_websocket():
+    """Connect to WebSocket server with retry logic."""
+    global ws
+    max_retries = 3
+    retry_count = 0
     
-    def stop(self):
-        """Stop capturing audio and close the WebSocket connection."""
-        if not self.is_running:
-            return
+    while retry_count < max_retries:
+        try:
+            if ws:
+                ws.close()
+            
+            ws = websocket.WebSocketApp(
+                "ws://localhost:8080/simple-websocket",
+                on_message=on_message,
+                on_error=on_error,
+                on_close=on_close,
+                on_open=on_open
+            )
+            
+            # Run WebSocket connection in a separate thread
+            wst = threading.Thread(target=ws.run_forever)
+            wst.daemon = True
+            wst.start()
+            
+            # Wait for connection to establish
+            time.sleep(1)
+            if ws.sock and ws.sock.connected:
+                print("✅ WebSocket connected successfully")
+                return True
+                
+        except Exception as e:
+            print(f"❌ Connection attempt {retry_count + 1} failed: {str(e)}")
+            retry_count += 1
+            time.sleep(2)  # Wait before retrying
+    
+    print("❌ Failed to connect after maximum retries")
+    return False
+
+def on_speech_start():
+    """Send speech start message."""
+    try:
+        message = {
+            "clientId": client_id,
+            "type": "speech_start",
+            "timestamp": int(time.time() * 1000)
+        }
+        if ws and ws.sock and ws.sock.connected:
+            ws.send(json.dumps(message))
+            print("🗣️ Speech start message sent")
+    except Exception as e:
+        print(f"❌ Error sending speech start message: {str(e)}")
+
+def on_speech_end(duration):
+    """Send speech end message."""
+    try:
+        message = {
+            "clientId": client_id,
+            "type": "speech_end",
+            "duration": duration,
+            "timestamp": int(time.time() * 1000)
+        }
+        if ws and ws.sock and ws.sock.connected:
+            ws.send(json.dumps(message))
+            print("✅ Speech end message sent")
+    except Exception as e:
+        print(f"❌ Error sending speech end message: {str(e)}")
+
+def audio_callback(in_data, frame_count, time_info, status):
+    """Callback for audio stream."""
+    global is_speaking, speech_start_time, audio_buffer, silence_start_time
+    
+    try:
+        # Convert audio data to numpy array
+        audio_data = np.frombuffer(in_data, dtype=np.int16)
         
-        self.is_running = False
+        # Calculate audio level
+        audio_level = np.abs(audio_data).mean()
+        print(f"🎤 Audio Level: {audio_level:.2f}")
         
-        # Stop the stream
-        if self.ws and self.ws.sock and self.ws.sock.connected:
-            stop_message = {
-                'clientId': self.client_id
+        current_time = time.time()
+        
+        if audio_level > SILENCE_THRESHOLD:
+            # Speech detected
+            if not is_speaking:
+                # Start of speech
+                is_speaking = True
+                speech_start_time = current_time
+                audio_buffer = [data]  # Start new buffer
+                print("🗣️ Speech detected")
+                on_speech_start()  # Send speech start message
+            else:
+                # Continuing speech
+                audio_buffer.append(data)
+                silence_start_time = None
+                
+                # Check if speech duration exceeds maximum
+                if current_time - speech_start_time > MAX_SPEECH_DURATION:
+                    # Force end of speech
+                    is_speaking = False
+                    speech_duration = current_time - speech_start_time
+                    print(f"⚠️ Speech duration exceeded maximum ({MAX_SPEECH_DURATION}s), forcing end")
+                    
+                    # Send speech end message
+                    on_speech_end(speech_duration)
+                    
+                    # Process complete speech segment
+                    process_complete_speech(audio_buffer, speech_duration)
+                    
+                    # Reset buffers
+                    audio_buffer = []
+                    silence_start_time = None
+        else:
+            # Silence detected
+            if is_speaking:
+                if silence_start_time is None:
+                    silence_start_time = current_time
+                elif current_time - silence_start_time >= SILENCE_DURATION:
+                    # Speech has ended
+                    is_speaking = False
+                    speech_duration = current_time - speech_start_time
+                    print(f"✅ Speech ended (duration: {speech_duration:.2f}s)")
+                    
+                    # Send speech end message
+                    on_speech_end(speech_duration)
+                    
+                    # Process complete speech segment
+                    process_complete_speech(audio_buffer, speech_duration)
+                    
+                    # Reset buffers
+                    audio_buffer = []
+                    silence_start_time = None
+    except Exception as e:
+        print(f"❌ Error in audio callback: {str(e)}")
+    
+    return (in_data, pyaudio.paContinue)
+
+def process_complete_speech(audio_buffer, speech_duration):
+    """Process a complete speech segment."""
+    try:
+        # Combine all audio chunks
+        complete_audio = b''.join(audio_buffer)
+        
+        # Check if audio size exceeds maximum
+        if len(complete_audio) > MAX_SEGMENT_SIZE:
+            print(f"⚠️ Audio size ({len(complete_audio)} bytes) exceeds maximum ({MAX_SEGMENT_SIZE} bytes), truncating")
+            complete_audio = complete_audio[:MAX_SEGMENT_SIZE]
+        
+        # Convert to base64
+        audio_base64 = base64.b64encode(complete_audio).decode('utf-8')
+        
+        # Send audio data
+        message = {
+            "clientId": client_id,
+            "type": "speech",
+            "audioData": audio_base64,
+            "duration": speech_duration,
+            "format": {
+                "encoding": "LINEAR16",
+                "sampleRateHertz": RATE,
+                "languageCode": "en-US",
+                "audioChannelCount": CHANNELS
             }
-            self.ws.send(json.dumps(stop_message))
-            self.ws.close()
+        }
         
-        # Close PyAudio
-        self.audio.terminate()
-        
-        print("Audio capture stopped")
+        if ws and ws.sock and ws.sock.connected:
+            ws.send(json.dumps(message))
+            print(f"📤 Sent speech segment ({len(audio_buffer)} chunks, {len(complete_audio)} bytes)")
+        else:
+            print("❌ WebSocket not connected, attempting to reconnect...")
+            connect_websocket()
+    except Exception as e:
+        print(f"❌ Error processing speech segment: {str(e)}")
+        if "connection was forcibly closed" in str(e):
+            print("🔄 Connection lost, attempting to reconnect...")
+            connect_websocket()
 
 def main():
-    parser = argparse.ArgumentParser(description="Capture audio from a virtual device and send it to the Java backend")
-    parser.add_argument("--device", type=int, help="Audio device ID (use -1 for default device)")
-    parser.add_argument("--sample-rate", type=int, default=DEFAULT_SAMPLE_RATE, help=f"Sample rate (default: {DEFAULT_SAMPLE_RATE})")
-    parser.add_argument("--chunk-size", type=int, default=DEFAULT_CHUNK_SIZE, help=f"Chunk size (default: {DEFAULT_CHUNK_SIZE})")
-    parser.add_argument("--websocket-url", type=str, default=DEFAULT_WEBSOCKET_URL, help=f"WebSocket URL (default: {DEFAULT_WEBSOCKET_URL})")
+    global device_id, client_id
     
+    parser = argparse.ArgumentParser(description="Audio Capture for PhantomQuery")
+    parser.add_argument("--device", type=int, help="Input device ID")
+    parser.add_argument("--sample-rate", type=int, default=DEFAULT_SAMPLE_RATE, help="Sample rate")
+    parser.add_argument("--chunk-size", type=int, default=DEFAULT_CHUNK_SIZE, help="Chunk size")
+    parser.add_argument("--ws-url", type=str, default=DEFAULT_WS_URL, help="WebSocket URL")
+    parser.add_argument("--list-devices", action="store_true", help="List available audio devices")
     args = parser.parse_args()
     
-    # Create audio capture
-    audio_capture = AudioCapture(
-        device_id=args.device,
-        sample_rate=args.sample_rate,
-        chunk_size=args.chunk_size,
-        websocket_url=args.websocket_url
+    if args.list_devices:
+        list_audio_devices()
+        return
+        
+    # Load device ID from configuration if not specified
+    if args.device is None:
+        device_id = load_device_config()
+        if device_id is None:
+            print("Please run select_audio_device.py first and select an INPUT device, or specify a device with --device")
+            return
+    else:
+        device_id = args.device
+        
+    # Enable WebSocket debug logging
+    websocket.enableTrace(False)
+    
+    # Connect to WebSocket server
+    ws = websocket.WebSocketApp(
+        args.ws_url,
+        on_message=on_message,
+        on_error=on_error,
+        on_close=on_close,
+        on_open=on_open
     )
     
-    # Start capturing audio
-    audio_capture.start()
+    # Run WebSocket connection in a separate thread
+    ws_thread = threading.Thread(target=ws.run_forever)
+    ws_thread.daemon = True
+    ws_thread.start()
+    
+    try:
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        logger.info("Stopping audio capture...")
+        if client_id:
+            # Send stop-stream message
+            stop_message = {
+                "clientId": client_id
+            }
+            ws.send(json.dumps(stop_message))
+        ws.close()
 
 if __name__ == "__main__":
     main() 

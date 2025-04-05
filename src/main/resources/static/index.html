@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>AI Interview Assistant</title>
+    <title>PhantomQuery</title>
     <style>
         body {
             font-family: Arial, sans-serif;
@@ -117,7 +117,7 @@
 </head>
 <body>
     <div class="container">
-        <h1>AI Interview Assistant</h1>
+        <h1>PhantomQuery</h1>
         
         <div class="control-panel">
             <button id="startButton" class="button">Start Audio Capture</button>
@@ -125,7 +125,7 @@
             <button id="refreshButton" class="refresh-button">Refresh Status</button>
             <button id="googleCloudStatusButton" class="refresh-button">Check Google Cloud Status</button>
         </div>
-        
+
         <div class="status-panel">
             <div id="statusIndicator" class="status inactive">Status: Inactive</div>
             <div id="googleCloudStatus" class="status inactive">Google Cloud: Not checked</div>
@@ -137,7 +137,7 @@
             </div>
         </div>
     </div>
-    
+
     <script>
         document.addEventListener('DOMContentLoaded', function() {
             const startButton = document.getElementById('startButton');
@@ -243,7 +243,7 @@
                             aiResponse.textContent = data.aiResponse;
                             getAnswersButton.disabled = true;
                             getAnswersButton.textContent = 'Answers Received';
-                        } else {
+                    } else {
                             aiResponse.textContent = 'Error: ' + data.error;
                         }
                     })
@@ -318,8 +318,8 @@
                             googleCloudStatus.className = 'status inactive';
                             console.error('Error checking Google Cloud status:', data.error);
                         }
-                    })
-                    .catch(error => {
+            })
+            .catch(error => {
                         console.error('Error checking Google Cloud status:', error);
                         googleCloudStatus.textContent = 'Google Cloud: Error checking status';
                         googleCloudStatus.className = 'status inactive';

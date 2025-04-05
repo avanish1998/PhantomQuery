@@ -1,0 +1,3 @@
+device_id=8
+device_name=CABLE Output (VB-Audio Virtual 
+device_type=input
