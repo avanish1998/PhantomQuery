@@ -12,14 +12,17 @@ public class WebSocketConfig implements WebSocketMessageBrokerConfigurer {
 
     @Override
     public void configureMessageBroker(MessageBrokerRegistry config) {
+        // Enable simple memory-based message broker to send messages to clients
         config.enableSimpleBroker("/topic");
+        // Set application destination prefix
         config.setApplicationDestinationPrefixes("/app");
     }
 
     @Override
     public void registerStompEndpoints(StompEndpointRegistry registry) {
-        registry.addEndpoint("/ws")
+        // Register STOMP endpoints
+        registry.addEndpoint("/audio-stream")
                 .setAllowedOrigins("*")
-                .withSockJS();
+                .withSockJS(); // Enable SockJS fallback
     }
 } 
