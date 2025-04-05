@@ -1,4 +1,4 @@
-# Audio Capture Script for AI Interview Assistant
+# Audio Capture Script for PhantomQuery
 
 This script captures audio from a virtual audio device and sends it to the Java backend via WebSocket for real-time speech-to-text processing.
 

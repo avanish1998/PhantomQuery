@@ -59,7 +59,8 @@ public class SpeechToTextService {
         try {
             // Create a simple audio format for the raw audio data
             // This is a fallback in case the audio data doesn't have proper headers
-            AudioFormat format = new AudioFormat(44100, 16, 2, true, false);
+            // Use 16kHz, 16-bit, mono as default (optimal for Google Cloud Speech-to-Text)
+            AudioFormat format = new AudioFormat(16000, 16, 1, true, false);
             
             // Create an audio input stream from the byte array
             ByteArrayInputStream bais = new ByteArrayInputStream(audioData);
@@ -160,6 +161,8 @@ public class SpeechToTextService {
                 .setLanguageCode("en-US")
                 .setSampleRateHertz((int) format.getSampleRate())
                 .setAudioChannelCount(format.getChannels())
+                .setEnableAutomaticPunctuation(true)
+                .setModel("video")  // Use the video model which is better for longer audio
                 .build();
             
             // Create the audio content
