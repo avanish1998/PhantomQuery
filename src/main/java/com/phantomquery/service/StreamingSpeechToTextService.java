@@ -1,4 +1,4 @@
-package com.aiinterview.service;
+package com.phantomquery.service;
 
 import com.google.api.gax.core.FixedCredentialsProvider;
 import com.google.auth.oauth2.GoogleCredentials;

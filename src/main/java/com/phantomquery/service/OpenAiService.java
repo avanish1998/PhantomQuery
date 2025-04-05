@@ -1,4 +1,4 @@
-package com.aiinterview.service;
+package com.phantomquery.service;
 
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestTemplate;
