@@ -1,4 +1,4 @@
-package com.aiinterview.config;
+package com.phantomquery.config;
 
 import org.springframework.context.annotation.Configuration;
 import org.springframework.messaging.simp.config.MessageBrokerRegistry;
@@ -13,7 +13,7 @@ import org.springframework.web.socket.config.annotation.EnableWebSocket;
 import org.springframework.web.socket.config.annotation.WebSocketConfigurer;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import com.aiinterview.controller.SimpleWebSocketController;
+import com.phantomquery.controller.SimpleWebSocketController;
 import org.springframework.beans.factory.annotation.Autowired;
 import java.util.List;
 import org.springframework.web.socket.server.standard.ServletServerContainerFactoryBean;

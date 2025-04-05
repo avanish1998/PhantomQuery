@@ -1,8 +1,8 @@
-package com.aiinterview.controller;
+package com.phantomquery.controller;
 
-import com.aiinterview.service.SystemAudioCaptureService;
-import com.aiinterview.service.SpeechToTextService;
-import com.aiinterview.service.OpenAiService;
+import com.phantomquery.service.SystemAudioCaptureService;
+import com.phantomquery.service.SpeechToTextService;
+import com.phantomquery.service.OpenAiService;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.*;

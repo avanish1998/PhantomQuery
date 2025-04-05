@@ -1,4 +1,4 @@
-package com.aiinterview.controller;
+package com.phantomquery.controller;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -13,8 +13,8 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.Base64;
 import java.io.IOException;
-import com.aiinterview.service.SpeechToTextService;
-import com.aiinterview.service.OpenAiService;
+import com.phantomquery.service.SpeechToTextService;
+import com.phantomquery.service.OpenAiService;
 import org.springframework.beans.factory.annotation.Autowired;
 import java.util.List;
 import java.util.ArrayList;
@@ -23,6 +23,7 @@ import java.io.ByteArrayOutputStream;
 import com.fasterxml.jackson.databind.JsonNode;
 import java.util.Date;
 import javax.sound.sampled.AudioFormat;
+import java.util.UUID;
 
 @Component
 public class SimpleWebSocketController extends TextWebSocketHandler {
